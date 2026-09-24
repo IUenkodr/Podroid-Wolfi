@@ -1,9 +1,9 @@
 # build-rootfs/Dockerfile.rootfs
 
-# ── Stage 1: cross-compile podroid-vsock-agent (musl-static aarch64) ────────
-# Uses qemu-user under the hood — no separate cross-toolchain needed.
-FROM --platform=linux/arm64 alpine:3.24 AS vsock-builder
-RUN apk add --no-cache musl-dev gcc make linux-headers
+# ── Stage 1: cross-compile podroid-vsock-agent (glibc-static aarch64) ────────
+# Using wolfi-base for build consistency.
+FROM --platform=linux/arm64 ghcr.io/wolfi-dev/wolfi-base AS vsock-builder
+RUN apk add --no-cache musl-dev gcc make linux-headers build-base
 WORKDIR /work
 COPY vsock-agent /work/vsock-agent
 RUN cd /work/vsock-agent && make CC=gcc
@@ -12,20 +12,15 @@ RUN cd /work/host-bridge && make CC=gcc
 COPY overlay-normalize /work/overlay-normalize
 RUN cd /work/overlay-normalize && make CC=gcc
 
-# ── Stage 2: build the Alpine rootfs squashfs ───────────────────────────────
-FROM alpine:3.24 AS builder
-
-ARG ALPINE_RELEASE=3.24.2
-ARG ALPINE_ARCH=aarch64
+# ── Stage 2: build the Wolfi rootfs squashfs ───────────────────────────────
+FROM ghcr.io/wolfi-dev/wolfi-base AS builder
 
 RUN apk add --no-cache curl squashfs-tools tar openssl libcap-utils
 
 WORKDIR /work
-RUN curl -L -o minirootfs.tar.gz \
-    "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_RELEASE%.*}/releases/${ALPINE_ARCH}/alpine-minirootfs-${ALPINE_RELEASE}-${ALPINE_ARCH}.tar.gz" \
- && mkdir rootfs \
- && tar -xzf minirootfs.tar.gz -C rootfs \
- && rm minirootfs.tar.gz
+# Wolfi doesn't use a traditional 'minirootfs.tar.gz' in the same way Alpine does.
+# We initialize the rootfs by creating a directory and using apk to install the base.
+RUN mkdir rootfs
 
 # Pull in the vsock-agent binary built in stage 1.
 COPY --from=vsock-builder /work/vsock-agent/podroid-vsock-agent /work/rootfs/usr/local/bin/podroid-vsock-agent
@@ -35,15 +30,12 @@ COPY --from=vsock-builder /work/overlay-normalize/podroid-overlay-normalize /wor
 ARG SYSTEM_VERSION=0
 ENV SYSTEM_VERSION=${SYSTEM_VERSION}
 
-ENV ALPINE_VERSION=${ALPINE_RELEASE}
+# We shift the versioning logic into build-rootfs.sh for Wolfi
 COPY files /work/files
 COPY build-rootfs.sh /work/build-rootfs.sh
 RUN chmod +x /work/build-rootfs.sh && /work/build-rootfs.sh
 
-RUN mksquashfs /work/rootfs /work/alpine-rootfs.squashfs \
-    -comp zstd -Xcompression-level 19 -all-root -noappend
-# (No -no-xattrs: rootless podman's newuidmap/newgidmap need their
-# file capabilities preserved; they're stored as security.capability xattr.)
+RUN mksquashfs /work/rootfs /work/wolfi-rootfs.squashfs \    -comp zstd -Xcompression-level 19 -all-root -noappend
 
 FROM scratch AS export
-COPY --from=builder /work/alpine-rootfs.squashfs /alpine-rootfs.squashfs
+COPY --from=builder /work/wolfi-rootfs.squashfs /wolfi-rootfs.squashfs
